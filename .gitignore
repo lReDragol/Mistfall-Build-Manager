@@ -1,0 +1,48 @@
+# Build artifacts
+dist/
+build/
+*.spec
+*.egg-info/
+
+# Temporary / generated
+tools/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.eggs/
+*.so
+*.dll
+
+# Archives
+*.zip
+*.7z
+*.tar.gz
+*.rar
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# FModel / UE tools output
+Output/
+.data/
+*.log
+*.tmp
+
+# Python venv
+venv/
+.venv/
+env/
+ENV/
+
+# Local builds info
+BUILD_INFO.txt
+
+# Backups
+*.bak
+*~
