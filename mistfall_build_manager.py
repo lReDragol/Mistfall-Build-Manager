@@ -47,7 +47,7 @@ except ImportError:
     raise
 
 
-APP_NAME = "Менеджер сборок Mistfall 4.2"
+APP_NAME = "Менеджер сборок Mistfall 4.3.2.2"
 DATA_URLS = (
     "https://raw.githubusercontent.com/Mistfall-Builder/mistfall-builder.github.io/refs/heads/main/donnees.json",
     "https://mistfall-builder.github.io/donnees.json",
@@ -739,6 +739,7 @@ AFFIX_ICON_FILES = {
     "Spirit Shield": "Щит духа.png",
     "Aegis": "Эгида.png",
     "Vitality": "Энергичность.png",
+    "Resilience": "Выносливость.png",
 }
 
 
@@ -1549,12 +1550,17 @@ class MistfallDatabase:
         """
         Candidate loadouts for one slot.
 
-        Each candidate contains a real item + real compatible gems.
-        Target vectors are clamped to requested levels so the state space
-        stays small enough for instant-ish automatic selection.
+        The old solver clamped every target directly to the requested level.
+        That made an over-cap contribution indistinguishable from an exact one
+        and prevented the global solver from intentionally leaving 1-2 levels
+        for Triumph Wine.  We keep one extra "overflow" state per target now:
+        requested + 1 means "this slot/build already overshot the request".
         """
         names = list(targets)
-        caps = tuple(max(0, min(int(targets[name]), 7)) for name in names)
+        requested = tuple(max(0, min(int(targets[name]), 7)) for name in names)
+        # One overflow marker is enough: once an attribute is above the target,
+        # Triumph Wine can no longer make that target exact.
+        caps = tuple(min(8, level + 1) for level in requested)
         name_index = {name: index for index, name in enumerate(names)}
 
         best_by_vector: dict[tuple[int, ...], dict[str, Any]] = {}
@@ -1581,8 +1587,9 @@ class MistfallDatabase:
                 min(caps[index], base[index])
                 for index in range(len(names))
             )
-            states: dict[tuple[int, ...], tuple[list[int], int]] = {
-                start_vector: ([], off_target)
+            # vector -> (gem ids, unrelated affixes, used gem count)
+            states: dict[tuple[int, ...], tuple[list[int], int, int]] = {
+                start_vector: ([], off_target, 0)
             }
 
             for socket in list(item.get("s") or []):
@@ -1611,7 +1618,10 @@ class MistfallDatabase:
                         else:
                             gem_off_target += 1
 
-                    vector_tuple = tuple(vector)
+                    vector_tuple = tuple(
+                        min(caps[index], vector[index])
+                        for index in range(len(names))
+                    )
                     gem_id = int(gem.get("id", 0) or 0)
                     gem_rank = int(gem.get("l", 0) or 0)
 
@@ -1630,10 +1640,10 @@ class MistfallDatabase:
 
                 next_states: dict[
                     tuple[int, ...],
-                    tuple[list[int], int],
+                    tuple[list[int], int, int],
                 ] = {}
 
-                for state_vector, (gem_ids, state_off) in states.items():
+                for state_vector, (gem_ids, state_off, state_used) in states.items():
                     for gem_vector, (
                         gem_id,
                         gem_off,
@@ -1649,23 +1659,30 @@ class MistfallDatabase:
                         next_value = (
                             gem_ids + [gem_id],
                             state_off + gem_off,
+                            state_used + (1 if gem_id else 0),
                         )
 
                         previous = next_states.get(next_vector)
-                        if (
-                            previous is None
-                            or next_value[1] < previous[1]
+                        if previous is None or (
+                            next_value[1],
+                            next_value[2],
+                            tuple(next_value[0]),
+                        ) < (
+                            previous[1],
+                            previous[2],
+                            tuple(previous[0]),
                         ):
                             next_states[next_vector] = next_value
 
                 states = next_states
 
-            for vector, (gem_ids, candidate_off) in states.items():
+            for vector, (gem_ids, candidate_off, used_gems) in states.items():
                 candidate = {
                     "cfg": cfg,
                     "gems": gem_ids,
                     "vector": vector,
                     "off_target": candidate_off,
+                    "used_gems": used_gems,
                     "grade": grade,
                 }
 
@@ -1674,14 +1691,18 @@ class MistfallDatabase:
                     best_by_vector[vector] = candidate
                     continue
 
-                # Prefer fewer unrelated affixes, then higher rarity.
+                # Same useful contribution: first avoid unrelated affixes,
+                # then avoid unnecessary stones.  This is important when wine
+                # can supply the last 1-2 levels instead.
                 current_score = (
                     candidate_off,
+                    used_gems,
                     -grade,
                     cfg,
                 )
                 previous_score = (
                     int(previous["off_target"]),
+                    int(previous.get("used_gems", 0)),
                     -int(previous["grade"]),
                     int(previous["cfg"]),
                 )
@@ -1697,13 +1718,23 @@ class MistfallDatabase:
         active_weapon_slot: int = DEFAULT_ACTIVE_WEAPON_SLOT,
         include_second_weapon: bool = False,
         rarity_grade: int | None = 6,
+        use_triumph_wine: bool = False,
     ) -> dict[str, Any]:
         """
-        Build a complete equipment set that reaches requested affix levels.
+        Build a complete equipment set for the requested affix levels.
 
-        All seven armor/accessory slots and the active weapon are filled.
-        The inactive weapon stays EMPTY by default, matching the requested
-        creator behavior. It is filled only when include_second_weapon=True.
+        When ``use_triumph_wine`` is enabled, the solver is allowed to leave a
+        controlled deficit and close it with Triumph Wine.
+
+        Triumph Wine has a strict budget of 8 attribute boosts total.  One
+        attribute may receive at most +2 levels.  Therefore the two extreme
+        distributions are +1 to eight attributes or +2 to four attributes;
+        mixed distributions are also valid as long as the sum never exceeds 8.
+
+        A pure gear solution is always preferred.  Wine is used only when it
+        improves/reaches the requested final levels.  Overshooting a requested
+        level is penalized, so the solver may deliberately remove/rearrange a
+        gem or choose another innate affix to make room for a different target.
         """
         cleaned_targets = {
             str(name): max(1, min(int(level), 7))
@@ -1726,21 +1757,142 @@ class MistfallDatabase:
         names = list(cleaned_targets)
         target_vector = tuple(cleaned_targets[name] for name in names)
         zero_vector = tuple(0 for _ in names)
+        state_caps = tuple(min(8, level + 1) for level in target_vector)
+
+        def deficits_for(vector: tuple[int, ...]) -> tuple[int, ...]:
+            return tuple(
+                max(0, target_vector[index] - vector[index])
+                for index in range(len(names))
+            )
+
+        def overshoot_for(vector: tuple[int, ...]) -> tuple[int, ...]:
+            return tuple(
+                max(0, vector[index] - target_vector[index])
+                for index in range(len(names))
+            )
+
+        WINE_TOTAL_BUDGET = 8
+        WINE_MAX_PER_ATTRIBUTE = 2
+
+        def wine_exact_plan(vector: tuple[int, ...]) -> tuple[bool, tuple[int, ...], int]:
+            """Return (can_finish_exactly, bonus_vector, affected_attribute_count)."""
+            if any(overshoot_for(vector)):
+                return False, zero_vector, 0
+
+            deficits = deficits_for(vector)
+            affected = [value for value in deficits if value > 0]
+            if not affected:
+                return True, zero_vector, 0
+            if not use_triumph_wine:
+                return False, zero_vector, 0
+
+            # In game the wine has eight boost slots total.  A single
+            # attribute can occupy at most two of them.  Examples:
+            #   8 x +1 == 8 boosts
+            #   4 x +2 == 8 boosts
+            #   +2,+2,+1,+1,+1,+1 == 8 boosts
+            if any(value > WINE_MAX_PER_ATTRIBUTE for value in deficits):
+                return False, zero_vector, 0
+            if sum(deficits) > WINE_TOTAL_BUDGET:
+                return False, zero_vector, 0
+
+            return True, deficits, len(affected)
+
+        def best_effort_wine_plan(vector: tuple[int, ...]) -> tuple[tuple[int, ...], int]:
+            """Spend at most eight wine boosts on the most useful deficits."""
+            if not use_triumph_wine or any(overshoot_for(vector)):
+                return zero_vector, 0
+
+            deficits = deficits_for(vector)
+            bonus = [0] * len(names)
+            budget = WINE_TOTAL_BUDGET
+
+            # First give one level to as many missing requested attributes as
+            # possible.  Then spend the remaining budget on their second level.
+            # This mirrors the in-game 8-slot wine UI and avoids wasting both
+            # levels on one target while another target is still completely
+            # uncovered.
+            ranked = sorted(
+                (index for index, value in enumerate(deficits) if value > 0),
+                key=lambda index: (-deficits[index], index),
+            )
+
+            for pass_level in (1, 2):
+                if budget <= 0:
+                    break
+                for index in ranked:
+                    if budget <= 0:
+                        break
+                    if deficits[index] >= pass_level and bonus[index] < pass_level:
+                        bonus[index] += 1
+                        budget -= 1
+
+            affected_count = sum(1 for value in bonus if value > 0)
+            return tuple(bonus), affected_count
+
+        def remaining_after_best_wine(vector: tuple[int, ...]) -> int:
+            bonus, _profile = best_effort_wine_plan(vector)
+            return sum(
+                max(
+                    0,
+                    target_vector[index] - vector[index] - bonus[index],
+                )
+                for index in range(len(names))
+            )
+
+        def final_rank(
+            vector: tuple[int, ...],
+            value: tuple[int, int, int, dict[int, int], dict[int, list[int]]],
+        ) -> tuple[Any, ...]:
+            off_target, used_gems, grade_sum, _slot_cfg, _slot_gems = value
+            overshoot = overshoot_for(vector)
+            overshoot_sum = sum(overshoot)
+            deficits = deficits_for(vector)
+
+            if overshoot_sum == 0 and not any(deficits):
+                # Exact without wine is always the best outcome.
+                return (0, off_target, used_gems, -grade_sum)
+
+            can_wine, wine_bonus, profile = wine_exact_plan(vector)
+            if can_wine and any(wine_bonus):
+                return (
+                    1,
+                    sum(wine_bonus),
+                    profile,
+                    off_target,
+                    used_gems,
+                    -grade_sum,
+                )
+
+            # Fallback: strongly avoid overshoot, then minimize what would
+            # remain missing even after the strongest useful wine plan.
+            return (
+                2,
+                overshoot_sum,
+                remaining_after_best_wine(vector),
+                sum(deficits),
+                max(deficits, default=0),
+                off_target,
+                used_gems,
+                -grade_sum,
+            )
 
         active_slots = [
             0, 1, 2, 3, 4, 5, 6,
             active_weapon_slot,
         ]
 
-        # state -> (off_target, grade_sum, slot_cfg, slot_gems)
+        # state -> (off_target, used_gems, grade_sum, slot_cfg, slot_gems)
         states: dict[
             tuple[int, ...],
-            tuple[int, int, dict[int, int], dict[int, list[int]]],
+            tuple[int, int, int, dict[int, int], dict[int, list[int]]],
         ] = {
-            zero_vector: (0, 0, {}, {})
+            zero_vector: (0, 0, 0, {}, {})
         }
 
-        beam_limit = 4500
+        # Slightly wider beam than before because overflow/wine-aware states
+        # retain more useful alternatives.
+        beam_limit = 6500
 
         for slot in active_slots:
             candidates = self._auto_slot_candidates(
@@ -1762,11 +1914,12 @@ class MistfallDatabase:
 
             next_states: dict[
                 tuple[int, ...],
-                tuple[int, int, dict[int, int], dict[int, list[int]]],
+                tuple[int, int, int, dict[int, int], dict[int, list[int]]],
             ] = {}
 
             for state_vector, (
                 state_off,
+                state_used_gems,
                 state_grade,
                 state_cfg,
                 state_gems,
@@ -1775,7 +1928,7 @@ class MistfallDatabase:
                     vector = candidate["vector"]
                     next_vector = tuple(
                         min(
-                            target_vector[index],
+                            state_caps[index],
                             state_vector[index] + vector[index],
                         )
                         for index in range(len(names))
@@ -1783,6 +1936,7 @@ class MistfallDatabase:
 
                     next_value = (
                         state_off + int(candidate["off_target"]),
+                        state_used_gems + int(candidate.get("used_gems", 0)),
                         state_grade + int(candidate["grade"]),
                         {
                             **state_cfg,
@@ -1799,52 +1953,81 @@ class MistfallDatabase:
                         next_states[next_vector] = next_value
                         continue
 
-                    # Same achieved target vector:
-                    # cleaner build first, then higher total rarity.
+                    # Same raw target vector: cleaner first, then fewer stones.
                     if (
                         next_value[0],
-                        -next_value[1],
+                        next_value[1],
+                        -next_value[2],
                     ) < (
                         previous[0],
-                        -previous[1],
+                        previous[1],
+                        -previous[2],
                     ):
                         next_states[next_vector] = next_value
 
-            # Keep the solver responsive even for many simultaneous targets.
             if len(next_states) > beam_limit:
-                ranked = sorted(
-                    next_states.items(),
-                    key=lambda pair: (
-                        sum(
-                            target_vector[index] - pair[0][index]
-                            for index in range(len(names))
-                        ),
-                        pair[1][0],
-                        -pair[1][1],
-                    ),
-                )
+                def partial_rank(pair):
+                    vector, value = pair
+                    overshoot_sum = sum(overshoot_for(vector))
+                    deficits = deficits_for(vector)
+                    # During partial construction, prefer states whose
+                    # remaining deficit can fit inside the real Wine of Triumph
+                    # budget: at most +2 per attribute and 8 boosts in total.
+                    per_attribute_uncoverable = sum(
+                        max(0, value_ - WINE_MAX_PER_ATTRIBUTE)
+                        for value_ in deficits
+                    )
+                    coverable_points = sum(
+                        min(WINE_MAX_PER_ATTRIBUTE, value_)
+                        for value_ in deficits
+                    )
+                    budget_uncoverable = max(
+                        0,
+                        coverable_points - WINE_TOTAL_BUDGET,
+                    )
+                    beyond_wine = (
+                        per_attribute_uncoverable
+                        + budget_uncoverable
+                    )
+                    return (
+                        overshoot_sum,
+                        beyond_wine,
+                        sum(deficits),
+                        value[0],
+                        value[1],
+                        -value[2],
+                    )
+
+                ranked = sorted(next_states.items(), key=partial_rank)
                 next_states = dict(ranked[:beam_limit])
 
             states = next_states
 
-        if target_vector in states:
-            best_vector = target_vector
+        if not states:
+            raise ValueError("Не удалось построить ни одного допустимого варианта")
+
+        best_vector, best_value = min(
+            states.items(),
+            key=lambda pair: final_rank(pair[0], pair[1]),
+        )
+        off_target, used_gems, grade_sum, slot_cfg, slot_gems = best_value
+
+        can_finish, exact_wine_bonus, wine_profile = wine_exact_plan(best_vector)
+        gear_exact = best_vector == target_vector
+        if gear_exact:
+            exact_wine_bonus = zero_vector
+            wine_profile = 0
+            exact = True
+        elif can_finish:
             exact = True
         else:
-            best_vector = min(
-                states,
-                key=lambda vector: (
-                    sum(
-                        target_vector[index] - vector[index]
-                        for index in range(len(names))
-                    ),
-                    states[vector][0],
-                    -states[vector][1],
-                ),
-            )
+            exact_wine_bonus, wine_profile = best_effort_wine_plan(best_vector)
             exact = False
 
-        off_target, grade_sum, slot_cfg, slot_gems = states[best_vector]
+        final_vector = tuple(
+            best_vector[index] + exact_wine_bonus[index]
+            for index in range(len(names))
+        )
 
         # Inactive weapon is optional. By default it remains completely empty.
         inactive_weapon = 11 if active_weapon_slot == 10 else 10
@@ -1871,16 +2054,30 @@ class MistfallDatabase:
                 )
                 slot_cfg[inactive_weapon] = int(filler.get("id", 0) or 0)
 
+        wine_bonus = {
+            names[index]: int(exact_wine_bonus[index])
+            for index in range(len(names))
+            if int(exact_wine_bonus[index]) > 0
+        }
+
         return {
             "slot_cfg": slot_cfg,
             "slot_gems": slot_gems,
             "requested": dict(cleaned_targets),
             "achieved_vector": best_vector,
+            "final_vector": final_vector,
             "target_names": names,
             "exact": exact,
+            "gear_exact": gear_exact,
             "off_target": off_target,
+            "used_gems": used_gems,
             "grade_sum": grade_sum,
             "rarity_grade": rarity_grade,
+            "wine_enabled": bool(use_triumph_wine),
+            "wine_bonus": wine_bonus,
+            "wine_profile": int(wine_profile),
+            "wine_points": int(sum(wine_bonus.values())),
+            "wine_budget": int(WINE_TOTAL_BUDGET),
         }
 
     def encode(
@@ -2477,9 +2674,12 @@ class SegmentedAttributeBar(QWidget):
         level: int,
         parent: QWidget | None = None,
         compact: bool = False,
+        bonus_level: int = 0,
     ):
         super().__init__(parent)
         self.level = max(0, min(int(level), 7))
+        self.bonus_level = max(0, min(int(bonus_level), self.level))
+        self.base_level = max(0, self.level - self.bonus_level)
 
         self.segment_count = 7
         self.segment_width = ui_px(14 if compact else 16)
@@ -2498,17 +2698,34 @@ class SegmentedAttributeBar(QWidget):
         painter.setPen(Qt.NoPen)
 
         active = QColor("#a87835")
+        wine = QColor("#4b9fc9")
+        wine_highlight = QColor("#79c9ed")
         inactive = QColor("#343735")
 
         for index in range(self.segment_count):
             x = index * (self.segment_width + self.segment_gap)
+            if index < self.base_level:
+                fill = active
+            elif index < self.level:
+                fill = wine
+            else:
+                fill = inactive
+
             painter.fillRect(
                 x,
                 0,
                 self.segment_width,
                 self.segment_height,
-                active if index < self.level else inactive,
+                fill,
             )
+            if self.base_level <= index < self.level and self.segment_height >= 3:
+                painter.fillRect(
+                    x,
+                    0,
+                    self.segment_width,
+                    1,
+                    wine_highlight,
+                )
 
         painter.end()
 
@@ -2521,10 +2738,12 @@ class AttributeHoverPopup(QFrame):
         name: str,
         level: int,
         database: MistfallDatabase,
+        bonus_level: int = 0,
     ):
         super().__init__(None, Qt.ToolTip)
         self.name = name
         self.level = max(1, min(int(level), 7))
+        self.bonus_level = max(0, min(int(bonus_level), self.level))
         self.database = database
 
         self.setObjectName("attributeHoverPopup")
@@ -2553,7 +2772,10 @@ class AttributeHoverPopup(QFrame):
         title.setWordWrap(True)
         title_box.addWidget(title)
 
-        current = QLabel(f"Текущий уровень: Lv.{self.level}")
+        current_text = f"Текущий уровень: Lv.{self.level}"
+        if self.bonus_level:
+            current_text += f" · Вино триумфа +{self.bonus_level}"
+        current = QLabel(current_text)
         current.setObjectName("attributePopupCurrent")
         title_box.addWidget(current)
 
@@ -2642,10 +2864,12 @@ class AttributeRow(QFrame):
         level: int,
         database: MistfallDatabase | None = None,
         compact: bool = False,
+        bonus_level: int = 0,
     ):
         super().__init__()
         self.name = name
         self.level = level
+        self.bonus_level = max(0, min(int(bonus_level), int(level)))
         self.database = database
         self.compact = compact
         self._hover_popup: AttributeHoverPopup | None = None
@@ -2679,7 +2903,7 @@ class AttributeRow(QFrame):
         title.setWordWrap(False)
         middle.addWidget(title)
 
-        middle.addWidget(SegmentedAttributeBar(level, compact=compact))
+        middle.addWidget(SegmentedAttributeBar(level, compact=compact, bonus_level=self.bonus_level))
         layout.addLayout(middle, 1)
 
         value = QLabel(f"Lv.{level}")
@@ -2706,6 +2930,7 @@ class AttributeRow(QFrame):
             self.name,
             self.level,
             self.database,
+            self.bonus_level,
         )
         popup.adjustSize()
 
@@ -5189,6 +5414,9 @@ class BuildCreatorPage(QWidget):
         self.active_weapon_slot = DEFAULT_ACTIVE_WEAPON_SLOT
         self.auto_rarity_grade = 6
         self.auto_rarity_buttons: dict[int, RarityDiamondButton] = {}
+        self.triumph_wine_bonus: Counter = Counter()
+        self.triumph_wine_profile = 0
+        self.triumph_wine_exact = False
 
         # Manual item-browser filters. None means "all rarities".
         # __ANY__ / __NONE__ mirror the hidden compatibility combo values.
@@ -5459,14 +5687,6 @@ class BuildCreatorPage(QWidget):
         target_header.addWidget(add_target_button)
         auto_layout.addLayout(target_header)
 
-        target_help = QLabel(
-            "Задай нужные уровни. Программа сама подберёт "
-            "реальные предметы и самоцветы."
-        )
-        target_help.setObjectName("muted")
-        target_help.setWordWrap(True)
-        auto_layout.addWidget(target_help)
-
         rarity_panel = QFrame()
         rarity_panel.setObjectName("autoRarityPanel")
         rarity_layout = QHBoxLayout(rarity_panel)
@@ -5510,6 +5730,18 @@ class BuildCreatorPage(QWidget):
             "Второй слот останется пустым."
         )
         auto_layout.addWidget(self.include_second_weapon)
+
+        self.use_triumph_wine = QCheckBox("Вино триумфа")
+        self.use_triumph_wine.setObjectName("secondWeaponCheck")
+        self.use_triumph_wine.setChecked(False)
+        self.use_triumph_wine.setToolTip(
+            "Разрешить автоподбору оставить часть уровней под Вино триумфа.\n"
+            "Максимум 8 усилений суммарно; один атрибут получает не более +2.\n"
+            "Например: +1 к 8 атрибутам или +2 к 4 атрибутам.\n"
+            "Голубые деления в итоговой полоске показывают уровни от вина."
+        )
+        self.use_triumph_wine.toggled.connect(self._triumph_wine_toggled)
+        auto_layout.addWidget(self.use_triumph_wine)
 
         self.target_scroll = QScrollArea()
         self.target_scroll.setObjectName("builderTargetScroll")
@@ -5717,6 +5949,7 @@ class BuildCreatorPage(QWidget):
         )
 
         if class_changed:
+            self._clear_triumph_wine()
             self.finish_edit_mode()
             self.item_rarity_filter_grade = None
             self.item_affix_filter = "__ANY__"
@@ -5793,6 +6026,7 @@ class BuildCreatorPage(QWidget):
                 decoded_item.gem_ids
             )
 
+        self._clear_triumph_wine()
         self.active_weapon_slot = weapon_slot
         self.active_slot = 10
 
@@ -6191,6 +6425,7 @@ class BuildCreatorPage(QWidget):
 
 
     def _select_item_cfg(self, cfg: int) -> None:
+        self._clear_triumph_wine()
         self.slot_cfg[self.active_slot] = int(cfg or 0)
         self.slot_gems[self.active_slot] = []
         self.active_socket_index = 0
@@ -6523,6 +6758,7 @@ class BuildCreatorPage(QWidget):
         socket_index: int,
         gem_id: int,
     ) -> None:
+        self._clear_triumph_wine()
         gems = list(
             self.slot_gems.get(
                 self.active_slot,
@@ -6536,6 +6772,38 @@ class BuildCreatorPage(QWidget):
         self.slot_gems[self.active_slot] = gems
         self._render_sockets()
         self._update_generated()
+
+    # --------------------------------------------------------
+    # Triumph Wine overlay used by the automatic builder
+    # --------------------------------------------------------
+    def _clear_triumph_wine(self, rerender: bool = False) -> None:
+        had_bonus = bool(self.triumph_wine_bonus)
+        self.triumph_wine_bonus = Counter()
+        self.triumph_wine_profile = 0
+        self.triumph_wine_exact = False
+        if rerender and had_bonus:
+            self._update_generated()
+
+    def _triumph_wine_toggled(self, checked: bool) -> None:
+        self._clear_triumph_wine(rerender=True)
+        self._target_changed()
+
+    def _wine_summary_text(self) -> str:
+        if not self.triumph_wine_bonus:
+            return ""
+        parts = [
+            f"{ru_affix(name)} +{level}"
+            for name, level in sorted(
+                self.triumph_wine_bonus.items(),
+                key=lambda pair: (-pair[1], ru_affix(pair[0])),
+            )
+        ]
+        points = sum(int(level) for level in self.triumph_wine_bonus.values())
+        affected = len(self.triumph_wine_bonus)
+        usage = f"{points}/8 усилений"
+        if affected:
+            usage += f", {affected} атр."
+        return "Вино триумфа (" + usage + "): " + " · ".join(parts)
 
     # --------------------------------------------------------
     # Auto-build rarity
@@ -6698,6 +6966,8 @@ class BuildCreatorPage(QWidget):
         self.target_rows.clear()
 
     def _target_changed(self) -> None:
+        if self.triumph_wine_bonus:
+            self._clear_triumph_wine(rerender=True)
         targets = self.requested_attributes()
         rarity_name = RARITY_RU.get(
             self.auto_rarity_grade,
@@ -6747,7 +7017,8 @@ class BuildCreatorPage(QWidget):
             return
 
         self.auto_status.setText(
-            "Подбираю предметы и самоцветы…"
+            "Подбираю предметы, самоцветы"
+            + (" и Вино триумфа…" if self.use_triumph_wine.isChecked() else "…")
         )
         QApplication.processEvents()
 
@@ -6758,8 +7029,10 @@ class BuildCreatorPage(QWidget):
                 self.active_weapon_slot,
                 self.include_second_weapon.isChecked(),
                 self.auto_rarity_grade,
+                self.use_triumph_wine.isChecked(),
             )
         except Exception as exc:
+            self._clear_triumph_wine(rerender=True)
             self.auto_status.setText(
                 f"Автоподбор не удался: {exc}"
             )
@@ -6775,6 +7048,13 @@ class BuildCreatorPage(QWidget):
             )
             for slot in DISPLAY_SLOT_ORDER
         }
+        self.triumph_wine_bonus = Counter({
+            str(name): int(level)
+            for name, level in dict(result.get("wine_bonus") or {}).items()
+            if int(level) > 0
+        })
+        self.triumph_wine_profile = int(result.get("wine_profile", 0) or 0)
+        self.triumph_wine_exact = bool(result.get("exact", False))
 
         self._refresh_editor()
         decoded = self._update_generated()
@@ -6785,51 +7065,61 @@ class BuildCreatorPage(QWidget):
             )
             return
 
+        final_attributes = Counter(decoded.attributes)
+        final_attributes.update(self.triumph_wine_bonus)
+
         missing: list[str] = []
+        excessive: list[str] = []
         for name, requested_level in targets.items():
-            actual_level = int(
-                decoded.attributes.get(name, 0)
-            )
+            actual_level = int(final_attributes.get(name, 0))
             if actual_level < requested_level:
                 missing.append(
-                    f"{ru_affix(name)} "
-                    f"{actual_level}/{requested_level}"
+                    f"{ru_affix(name)} {actual_level}/{requested_level}"
+                )
+            elif actual_level > requested_level:
+                excessive.append(
+                    f"{ru_affix(name)} {actual_level}/{requested_level}"
                 )
 
-        if missing:
-            rarity_name = RARITY_RU.get(
-                self.auto_rarity_grade,
-                str(self.auto_rarity_grade),
-            )
-            self.auto_status.setText(
+        rarity_name = RARITY_RU.get(
+            self.auto_rarity_grade,
+            str(self.auto_rarity_grade),
+        )
+        wine_text = self._wine_summary_text()
+
+        if missing or excessive:
+            details = []
+            if missing:
+                details.append("не хватает: " + ", ".join(missing))
+            if excessive:
+                details.append("выше цели: " + ", ".join(excessive))
+            text = (
                 f"{rarity_name}: точное сочетание не найдено. "
-                "Подобран максимально близкий вариант: "
-                + ", ".join(missing)
+                "Подобран максимально близкий вариант — "
+                + "; ".join(details)
             )
+            if wine_text:
+                text += ". " + wine_text
+            self.auto_status.setText(text)
         else:
             target_text = " · ".join(
-                f"{ru_affix(name)} Lv."
-                f"{int(decoded.attributes.get(name, 0))}"
+                f"{ru_affix(name)} Lv.{int(final_attributes.get(name, 0))}"
                 for name in targets
             )
-            rarity_name = RARITY_RU.get(
-                self.auto_rarity_grade,
-                str(self.auto_rarity_grade),
-            )
-            self.auto_status.setText(
-                f"Подобрано [{rarity_name}]: " + target_text
-            )
+            text = f"Подобрано [{rarity_name}]: " + target_text
+            if wine_text:
+                text += ". " + wine_text + ". Голубые деления — уровни от вина."
+            self.auto_status.setText(text)
 
-    # --------------------------------------------------------
-    # Build state
-    # --------------------------------------------------------
     def clear_active_slot(self) -> None:
+        self._clear_triumph_wine()
         self.slot_cfg[self.active_slot] = 0
         self.slot_gems[self.active_slot] = []
         self._refresh_editor()
         self._update_generated()
 
     def reset_build(self) -> None:
+        self._clear_triumph_wine()
         self.slot_cfg = {
             slot: 0 for slot in DISPLAY_SLOT_ORDER
         }
@@ -6847,6 +7137,7 @@ class BuildCreatorPage(QWidget):
         if weapon_slot not in WEAPON_SLOTS:
             return
 
+        self._clear_triumph_wine()
         self.active_weapon_slot = weapon_slot
         self._update_generated()
 
@@ -6930,9 +7221,12 @@ class BuildCreatorPage(QWidget):
                 slot == self.active_slot
             )
 
-        if decoded.attributes:
+        display_attributes = Counter(decoded.attributes)
+        display_attributes.update(self.triumph_wine_bonus)
+
+        if display_attributes:
             for name, level in sorted(
-                decoded.attributes.items(),
+                display_attributes.items(),
                 key=lambda pair: (
                     -pair[1],
                     ru_affix(pair[0]),
@@ -6944,6 +7238,7 @@ class BuildCreatorPage(QWidget):
                         level,
                         self.database,
                         compact=True,
+                        bonus_level=int(self.triumph_wine_bonus.get(name, 0)),
                     )
                 )
         else:
