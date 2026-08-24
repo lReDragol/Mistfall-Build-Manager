@@ -47,7 +47,7 @@ except ImportError:
     raise
 
 
-APP_NAME = "Менеджер сборок Mistfall 4.3.2.2"
+APP_NAME = "Менеджер сборок Mistfall 4.3.3"
 DATA_URLS = (
     "https://raw.githubusercontent.com/Mistfall-Builder/mistfall-builder.github.io/refs/heads/main/donnees.json",
     "https://mistfall-builder.github.io/donnees.json",
@@ -739,7 +739,6 @@ AFFIX_ICON_FILES = {
     "Spirit Shield": "Щит духа.png",
     "Aegis": "Эгида.png",
     "Vitality": "Энергичность.png",
-    "Resilience": "Выносливость.png",
 }
 
 
@@ -1388,6 +1387,25 @@ class MistfallDatabase:
             except (KeyError, TypeError, ValueError):
                 pass
 
+        # Caches used by the automatic build solver. Legendary equipment has
+        # many more equivalent item/gem combinations; rebuilding these lookup
+        # tables for every slot made the UI noticeably slower.
+        self._allowed_gem_ids = frozenset(
+            int(raw or 0)
+            for raw in self.codec.get("gemIds", [])
+            if int(raw or 0)
+        )
+        self._compatible_gems_cache: dict[tuple[int, int], tuple[dict[str, Any], ...]] = {}
+        self._auto_gem_options_cache: dict[
+            tuple[tuple[str, ...], tuple[int, ...], int, int],
+            tuple[tuple[tuple[int, ...], tuple[int, int, int]], ...],
+        ] = {}
+        self._auto_slot_candidates_cache: dict[
+            tuple[str, int, tuple[tuple[str, int], ...], int | None],
+            tuple[dict[str, Any], ...],
+        ] = {}
+        self._auto_build_result_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+
     def decode(
         self,
         code: str,
@@ -1514,14 +1532,14 @@ class MistfallDatabase:
         return result
 
     def compatible_gems(self, socket_type: int, socket_level: int) -> list[dict[str, Any]]:
-        allowed_ids = {
-            int(raw or 0)
-            for raw in self.codec.get("gemIds", [])
-            if int(raw or 0)
-        }
+        key = (int(socket_type), int(socket_level))
+        cached = self._compatible_gems_cache.get(key)
+        if cached is not None:
+            return list(cached)
+
         result: list[dict[str, Any]] = []
         for gem_id, gem in self.gem_by_id.items():
-            if gem_id not in allowed_ids:
+            if gem_id not in self._allowed_gem_ids:
                 continue
             gem_type = int(gem.get("t", 0) or 0)
             gem_level = int(gem.get("l", 0) or 0)
@@ -1538,7 +1556,63 @@ class MistfallDatabase:
                 str(gem.get("n", "")),
             )
         )
-        return result
+        self._compatible_gems_cache[key] = tuple(result)
+        return list(result)
+
+    def _auto_gem_options(
+        self,
+        socket_type: int,
+        socket_level: int,
+        names: tuple[str, ...],
+        caps: tuple[int, ...],
+    ) -> tuple[tuple[tuple[int, ...], tuple[int, int, int]], ...]:
+        """Compressed useful gem choices for one socket/target set.
+
+        Many items share the same socket type.  Computing the same gem ->
+        target-vector mapping dozens of times was one of the largest costs on
+        Legendary builds.
+        """
+        cache_key = (names, caps, int(socket_type), int(socket_level))
+        cached = self._auto_gem_options_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        name_index = {name: index for index, name in enumerate(names)}
+        zero = tuple(0 for _ in names)
+        gem_options: dict[tuple[int, ...], tuple[int, int, int]] = {
+            zero: (0, 0, 0)
+        }
+
+        for gem in self.compatible_gems(socket_type, socket_level):
+            vector = [0] * len(names)
+            gem_off_target = 0
+            for affix in gem.get("a", []) or []:
+                affix_name = str(affix)
+                if affix_name in name_index:
+                    vector[name_index[affix_name]] += 1
+                else:
+                    gem_off_target += 1
+
+            vector_tuple = tuple(
+                min(caps[index], vector[index])
+                for index in range(len(names))
+            )
+            gem_id = int(gem.get("id", 0) or 0)
+            gem_rank = int(gem.get("l", 0) or 0)
+
+            previous = gem_options.get(vector_tuple)
+            current_score = (gem_off_target, -gem_rank, gem_id)
+            if (
+                previous is None
+                or current_score < (previous[1], -previous[2], previous[0])
+            ):
+                gem_options[vector_tuple] = (
+                    gem_id, gem_off_target, gem_rank
+                )
+
+        packed = tuple(gem_options.items())
+        self._auto_gem_options_cache[cache_key] = packed
+        return packed
 
     def _auto_slot_candidates(
         self,
@@ -1556,6 +1630,16 @@ class MistfallDatabase:
         for Triumph Wine.  We keep one extra "overflow" state per target now:
         requested + 1 means "this slot/build already overshot the request".
         """
+        cache_key = (
+            str(class_name),
+            int(slot),
+            tuple((str(name), int(level)) for name, level in targets.items()),
+            int(rarity_grade) if rarity_grade is not None else None,
+        )
+        cached_candidates = self._auto_slot_candidates_cache.get(cache_key)
+        if cached_candidates is not None:
+            return list(cached_candidates)
+
         names = list(targets)
         requested = tuple(max(0, min(int(targets[name]), 7)) for name in names)
         # One overflow marker is enough: once an attribute is above the target,
@@ -1600,43 +1684,12 @@ class MistfallDatabase:
                     socket_type = 0
                     socket_level = 0
 
-                # For a target-vector-equivalent gem, keep the cleanest one.
-                gem_options: dict[
-                    tuple[int, ...],
-                    tuple[int, int, int],
-                ] = {
-                    tuple([0] * len(names)): (0, 0, 0)
-                }
-
-                for gem in self.compatible_gems(socket_type, socket_level):
-                    vector = [0] * len(names)
-                    gem_off_target = 0
-                    for affix in gem.get("a", []) or []:
-                        affix_name = str(affix)
-                        if affix_name in name_index:
-                            vector[name_index[affix_name]] += 1
-                        else:
-                            gem_off_target += 1
-
-                    vector_tuple = tuple(
-                        min(caps[index], vector[index])
-                        for index in range(len(names))
-                    )
-                    gem_id = int(gem.get("id", 0) or 0)
-                    gem_rank = int(gem.get("l", 0) or 0)
-
-                    previous = gem_options.get(vector_tuple)
-                    current_score = (gem_off_target, -gem_rank, gem_id)
-                    if (
-                        previous is None
-                        or current_score
-                        < (previous[1], -previous[2], previous[0])
-                    ):
-                        gem_options[vector_tuple] = (
-                            gem_id,
-                            gem_off_target,
-                            gem_rank,
-                        )
+                gem_options = self._auto_gem_options(
+                    socket_type,
+                    socket_level,
+                    tuple(names),
+                    caps,
+                )
 
                 next_states: dict[
                     tuple[int, ...],
@@ -1648,7 +1701,7 @@ class MistfallDatabase:
                         gem_id,
                         gem_off,
                         _gem_rank,
-                    ) in gem_options.items():
+                    ) in gem_options:
                         next_vector = tuple(
                             min(
                                 caps[index],
@@ -1709,7 +1762,9 @@ class MistfallDatabase:
                 if current_score < previous_score:
                     best_by_vector[vector] = candidate
 
-        return list(best_by_vector.values())
+        result = tuple(best_by_vector.values())
+        self._auto_slot_candidates_cache[cache_key] = result
+        return list(result)
 
     def auto_build_for_attributes(
         self,
@@ -1753,6 +1808,28 @@ class MistfallDatabase:
                 raise ValueError(
                     "Для автоподбора выбери редкость от Редкой до Легендарной"
                 )
+
+        result_cache_key = (
+            str(class_name),
+            tuple((str(name), int(level)) for name, level in cleaned_targets.items()),
+            int(active_weapon_slot),
+            bool(include_second_weapon),
+            int(rarity_grade) if rarity_grade is not None else None,
+            bool(use_triumph_wine),
+        )
+        cached_result = self._auto_build_result_cache.get(result_cache_key)
+        if cached_result is not None:
+            # UI copies these values into its own state, but return fresh nested
+            # containers anyway so the cache can never be mutated accidentally.
+            clone = dict(cached_result)
+            clone["slot_cfg"] = dict(cached_result["slot_cfg"])
+            clone["slot_gems"] = {
+                slot: list(gems)
+                for slot, gems in cached_result["slot_gems"].items()
+            }
+            clone["requested"] = dict(cached_result["requested"])
+            clone["wine_bonus"] = dict(cached_result["wine_bonus"])
+            return clone
 
         names = list(cleaned_targets)
         target_vector = tuple(cleaned_targets[name] for name in names)
@@ -1842,9 +1919,9 @@ class MistfallDatabase:
 
         def final_rank(
             vector: tuple[int, ...],
-            value: tuple[int, int, int, dict[int, int], dict[int, list[int]]],
+            value: tuple[int, int, int, tuple[tuple[int, int, tuple[int, ...]], ...]],
         ) -> tuple[Any, ...]:
-            off_target, used_gems, grade_sum, _slot_cfg, _slot_gems = value
+            off_target, used_gems, grade_sum, _choices = value
             overshoot = overshoot_for(vector)
             overshoot_sum = sum(overshoot)
             deficits = deficits_for(vector)
@@ -1882,17 +1959,35 @@ class MistfallDatabase:
             active_weapon_slot,
         ]
 
-        # state -> (off_target, used_gems, grade_sum, slot_cfg, slot_gems)
+        # state -> (off_target, used_gems, grade_sum, choices)
+        #
+        # Important performance detail: the previous implementation copied two
+        # dictionaries (selected cfgs + gem lists) for EVERY state/candidate
+        # transition.  On Legendary builds that means hundreds of thousands of
+        # short-lived dict/list objects.  Keep a tiny immutable path instead and
+        # allocate it only when a transition actually wins its target vector.
+        Choice = tuple[int, int, tuple[int, ...]]
         states: dict[
             tuple[int, ...],
-            tuple[int, int, int, dict[int, int], dict[int, list[int]]],
+            tuple[int, int, int, tuple[Choice, ...]],
         ] = {
-            zero_vector: (0, 0, 0, {}, {})
+            zero_vector: (0, 0, 0, tuple())
         }
 
-        # Slightly wider beam than before because overflow/wine-aware states
-        # retain more useful alternatives.
-        beam_limit = 6500
+        # Adaptive beam.  Large target lists are exactly where Legendary
+        # builds used to stall: the number of vectors grows exponentially with
+        # the number of requested attributes.  A smaller beam there keeps the
+        # search responsive while the Wine-aware ranking preserves the useful
+        # states.  Small target lists keep a wider beam because they are cheap.
+        target_count = len(names)
+        if target_count >= 7:
+            beam_limit = 900
+        elif target_count == 6:
+            beam_limit = 1800
+        elif target_count == 5:
+            beam_limit = 3200
+        else:
+            beam_limit = 5000
 
         for slot in active_slots:
             candidates = self._auto_slot_candidates(
@@ -1914,56 +2009,52 @@ class MistfallDatabase:
 
             next_states: dict[
                 tuple[int, ...],
-                tuple[int, int, int, dict[int, int], dict[int, list[int]]],
+                tuple[int, int, int, tuple[Choice, ...]],
             ] = {}
 
             for state_vector, (
                 state_off,
                 state_used_gems,
                 state_grade,
-                state_cfg,
-                state_gems,
+                state_choices,
             ) in states.items():
                 for candidate in candidates:
-                    vector = candidate["vector"]
+                    candidate_vector = candidate["vector"]
                     next_vector = tuple(
                         min(
                             state_caps[index],
-                            state_vector[index] + vector[index],
+                            state_vector[index] + candidate_vector[index],
                         )
                         for index in range(len(names))
                     )
 
-                    next_value = (
-                        state_off + int(candidate["off_target"]),
-                        state_used_gems + int(candidate.get("used_gems", 0)),
-                        state_grade + int(candidate["grade"]),
-                        {
-                            **state_cfg,
-                            slot: int(candidate["cfg"]),
-                        },
-                        {
-                            **state_gems,
-                            slot: list(candidate["gems"]),
-                        },
-                    )
+                    next_off = state_off + int(candidate["off_target"])
+                    next_used = state_used_gems + int(candidate.get("used_gems", 0))
+                    next_grade = state_grade + int(candidate["grade"])
 
                     previous = next_states.get(next_vector)
-                    if previous is None:
-                        next_states[next_vector] = next_value
-                        continue
-
-                    # Same raw target vector: cleaner first, then fewer stones.
-                    if (
-                        next_value[0],
-                        next_value[1],
-                        -next_value[2],
-                    ) < (
+                    if previous is not None and (
+                        next_off,
+                        next_used,
+                        -next_grade,
+                    ) >= (
                         previous[0],
                         previous[1],
                         -previous[2],
                     ):
-                        next_states[next_vector] = next_value
+                        continue
+
+                    choice: Choice = (
+                        int(slot),
+                        int(candidate["cfg"]),
+                        tuple(int(gem_id) for gem_id in candidate["gems"]),
+                    )
+                    next_states[next_vector] = (
+                        next_off,
+                        next_used,
+                        next_grade,
+                        state_choices + (choice,),
+                    )
 
             if len(next_states) > beam_limit:
                 def partial_rank(pair):
@@ -2010,7 +2101,9 @@ class MistfallDatabase:
             states.items(),
             key=lambda pair: final_rank(pair[0], pair[1]),
         )
-        off_target, used_gems, grade_sum, slot_cfg, slot_gems = best_value
+        off_target, used_gems, grade_sum, choices = best_value
+        slot_cfg = {slot: cfg for slot, cfg, _gems in choices}
+        slot_gems = {slot: list(gems) for slot, _cfg, gems in choices}
 
         can_finish, exact_wine_bonus, wine_profile = wine_exact_plan(best_vector)
         gear_exact = best_vector == target_vector
@@ -2060,7 +2153,7 @@ class MistfallDatabase:
             if int(exact_wine_bonus[index]) > 0
         }
 
-        return {
+        result = {
             "slot_cfg": slot_cfg,
             "slot_gems": slot_gems,
             "requested": dict(cleaned_targets),
@@ -2079,6 +2172,14 @@ class MistfallDatabase:
             "wine_points": int(sum(wine_bonus.values())),
             "wine_budget": int(WINE_TOTAL_BUDGET),
         }
+        self._auto_build_result_cache[result_cache_key] = {
+            **result,
+            "slot_cfg": dict(slot_cfg),
+            "slot_gems": {slot: list(gems) for slot, gems in slot_gems.items()},
+            "requested": dict(result["requested"]),
+            "wine_bonus": dict(wine_bonus),
+        }
+        return result
 
     def encode(
         self,
