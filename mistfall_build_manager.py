@@ -739,6 +739,7 @@ AFFIX_ICON_FILES = {
     "Spirit Shield": "Щит духа.png",
     "Aegis": "Эгида.png",
     "Vitality": "Энергичность.png",
+    "Resilience": "Выносливость.png",
 }
 
 
