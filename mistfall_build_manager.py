@@ -47,7 +47,7 @@ except ImportError:
     raise
 
 
-APP_NAME = "Менеджер сборок Mistfall 4.3.3"
+APP_NAME = "Менеджер сборок Mistfall 4.5.0"
 DATA_URLS = (
     "https://raw.githubusercontent.com/Mistfall-Builder/mistfall-builder.github.io/refs/heads/main/donnees.json",
     "https://mistfall-builder.github.io/donnees.json",
@@ -61,6 +61,40 @@ CLASS_RU = {
     "Shadowstrix": "Тенестрикс",
     "Seer": "Провидец",
     "Withered Knight": "Иссохший рыцарь",
+}
+
+WEAPON_TYPE_RU = {
+    "Sword and Shield": "Меч и щит",
+    "Hammer": "Молот",
+    "Staff": "Посох",
+    "Bow": "Лук",
+    "Dagger": "Кинжал",
+    "Dual Blades": "Парные клинки",
+    "Catalyst": "Катализатор",
+    "Mace": "Булава",
+    "Greatsword": "Двуручный меч",
+    "Polearm and Shield": "Древковое оружие и щит",
+}
+
+# The weapon decides the damage affinity for hybrid classes (most notably the
+# Seer).  Accessories are then selected from the matching physical/magic
+# damage and defence families.
+WEAPON_AFFINITY = {
+    "Staff": "magic",
+    "Catalyst": "magic",
+    "Sword and Shield": "physical",
+    "Hammer": "physical",
+    "Bow": "physical",
+    "Dagger": "physical",
+    "Dual Blades": "physical",
+    "Mace": "physical",
+    "Greatsword": "physical",
+    "Polearm and Shield": "physical",
+}
+
+AFFINITY_RU = {
+    "physical": "Физический урон / защита",
+    "magic": "Магический урон / защита",
 }
 
 AFFIX_RU = {
@@ -1369,17 +1403,35 @@ class MistfallDatabase:
         self.codec = data.get("codec", {})
         self.classes = data.get("classes", {})
         self.rarities = data.get("raretes", {})
+        self.weapons = data.get("armes", {})
+        self.class_affinities = data.get("affinites", {})
 
         self.item_by_id: dict[int, dict[str, Any]] = {}
-        for item_list in data.get("objets", {}).values():
-            for item in item_list:
+        for group_key, item_list in data.get("objets", {}).items():
+            parts = str(group_key).split("|")
+            group_class_id = parts[0] if parts else ""
+            group_slot = parts[1] if len(parts) > 1 else ""
+            group_weapon_type = (
+                self._normalize_weapon_type(parts[2])
+                if group_slot == "weapon" and len(parts) > 2
+                else None
+            )
+            for source_item in item_list:
                 try:
+                    item = dict(source_item)
+                    if group_weapon_type:
+                        item["_weapon_type"] = group_weapon_type
+                        item["_class_id"] = group_class_id
                     self.item_by_id[int(item["id"])] = item
                 except (KeyError, TypeError, ValueError):
                     pass
 
         for cfg_id, override in ITEM_ID_OVERRIDES.items():
-            self.item_by_id.setdefault(int(cfg_id), dict(override))
+            item = dict(override)
+            if int(cfg_id) in (3070904, 3071001):
+                item["_weapon_type"] = "Catalyst"
+                item["_class_id"] = "14"
+            self.item_by_id.setdefault(int(cfg_id), item)
 
         self.gem_by_id: dict[int, dict[str, Any]] = {}
         for gem in data.get("gemmes", []):
@@ -1402,10 +1454,90 @@ class MistfallDatabase:
             tuple[tuple[tuple[int, ...], tuple[int, int, int]], ...],
         ] = {}
         self._auto_slot_candidates_cache: dict[
-            tuple[str, int, tuple[tuple[str, int], ...], int | None],
+            tuple[
+                str,
+                int,
+                tuple[tuple[str, int], ...],
+                int | None,
+                str | None,
+                str | None,
+            ],
             tuple[dict[str, Any], ...],
         ] = {}
         self._auto_build_result_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+
+    @staticmethod
+    def _normalize_weapon_type(value: Any) -> str:
+        weapon_type = str(value or "").strip()
+        aliases = {
+            "Warhammer": "Hammer",
+            "Bow and Arrow": "Bow",
+        }
+        if weapon_type in aliases:
+            return aliases[weapon_type]
+        return weapon_type
+
+    def class_weapon_types(self, class_name: str) -> list[str]:
+        class_id = self.class_id_for_name(class_name)
+        raw_types = self.weapons.get(str(class_id), [])
+        if isinstance(raw_types, str):
+            raw_types = [raw_types]
+
+        result: list[str] = []
+        for raw_type in raw_types or []:
+            weapon_type = self._normalize_weapon_type(raw_type)
+            if weapon_type and weapon_type not in result:
+                result.append(weapon_type)
+
+        # Be tolerant of a newer database that added weapons to objets before
+        # updating the compact armes table.
+        for item in self.class_slot_items(class_name, DEFAULT_ACTIVE_WEAPON_SLOT):
+            weapon_type = self.item_weapon_type(item)
+            if weapon_type and weapon_type not in result:
+                result.append(weapon_type)
+        return result
+
+    def item_weapon_type(self, item: dict[str, Any] | None) -> str | None:
+        if not item:
+            return None
+        weapon_type = self._normalize_weapon_type(item.get("_weapon_type"))
+        return weapon_type or None
+
+    def build_affinity(
+        self,
+        class_name: str,
+        weapon_type: str | None = None,
+    ) -> str:
+        normalized_type = self._normalize_weapon_type(weapon_type)
+        if normalized_type in WEAPON_AFFINITY:
+            return WEAPON_AFFINITY[normalized_type]
+        class_id = self.class_id_for_name(class_name)
+        affinity = str(self.class_affinities.get(str(class_id), "physical"))
+        return affinity if affinity in ("physical", "magic") else "physical"
+
+    @staticmethod
+    def _accessory_affinity_penalty(
+        item: dict[str, Any],
+        affinity: str | None,
+    ) -> int:
+        if affinity not in ("physical", "magic"):
+            return 0
+        stats = dict(item.get("at") or {})
+        preferred = (
+            ("physicalIncrease", "physicalReduction")
+            if affinity == "physical"
+            else ("magicalIncrease", "magicalReduction")
+        )
+        opposite = (
+            ("magicalIncrease", "magicalReduction")
+            if affinity == "physical"
+            else ("physicalIncrease", "physicalReduction")
+        )
+        if any(float(stats.get(name, 0) or 0) > 0 for name in preferred):
+            return 0
+        if any(float(stats.get(name, 0) or 0) > 0 for name in opposite):
+            return 2
+        return 1
 
     def decode(
         self,
@@ -1621,6 +1753,8 @@ class MistfallDatabase:
         slot: int,
         targets: dict[str, int],
         rarity_grade: int | None = None,
+        weapon_type: str | None = None,
+        affinity: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Candidate loadouts for one slot.
@@ -1636,6 +1770,8 @@ class MistfallDatabase:
             int(slot),
             tuple((str(name), int(level)) for name, level in targets.items()),
             int(rarity_grade) if rarity_grade is not None else None,
+            self._normalize_weapon_type(weapon_type) or None,
+            str(affinity) if affinity else None,
         )
         cached_candidates = self._auto_slot_candidates_cache.get(cache_key)
         if cached_candidates is not None:
@@ -1654,6 +1790,10 @@ class MistfallDatabase:
             cfg = int(item.get("id", 0) or 0)
             if not cfg:
                 continue
+
+            if slot in WEAPON_SLOTS and weapon_type:
+                if self.item_weapon_type(item) != self._normalize_weapon_type(weapon_type):
+                    continue
 
             grade = int(item.get("g", 0) or 0)
             if rarity_grade is not None and grade != int(rarity_grade):
@@ -1738,6 +1878,11 @@ class MistfallDatabase:
                     "off_target": candidate_off,
                     "used_gems": used_gems,
                     "grade": grade,
+                    "affinity_penalty": (
+                        self._accessory_affinity_penalty(item, affinity)
+                        if slot in (5, 6)
+                        else 0
+                    ),
                 }
 
                 previous = best_by_vector.get(vector)
@@ -1749,12 +1894,14 @@ class MistfallDatabase:
                 # then avoid unnecessary stones.  This is important when wine
                 # can supply the last 1-2 levels instead.
                 current_score = (
+                    int(candidate["affinity_penalty"]),
                     candidate_off,
                     used_gems,
                     -grade,
                     cfg,
                 )
                 previous_score = (
+                    int(previous.get("affinity_penalty", 0)),
                     int(previous["off_target"]),
                     int(previous.get("used_gems", 0)),
                     -int(previous["grade"]),
@@ -1775,6 +1922,7 @@ class MistfallDatabase:
         include_second_weapon: bool = False,
         rarity_grade: int | None = 6,
         use_triumph_wine: bool = False,
+        weapon_type: str | None = None,
     ) -> dict[str, Any]:
         """
         Build a complete equipment set for the requested affix levels.
@@ -1803,6 +1951,17 @@ class MistfallDatabase:
         if active_weapon_slot not in WEAPON_SLOTS:
             active_weapon_slot = DEFAULT_ACTIVE_WEAPON_SLOT
 
+        available_weapon_types = self.class_weapon_types(class_name)
+        weapon_type = self._normalize_weapon_type(weapon_type)
+        if not weapon_type and available_weapon_types:
+            weapon_type = available_weapon_types[0]
+        if weapon_type and weapon_type not in available_weapon_types:
+            raise ValueError(
+                f"Тип оружия «{WEAPON_TYPE_RU.get(weapon_type, weapon_type)}» "
+                f"недоступен классу «{CLASS_RU.get(class_name, class_name)}»"
+            )
+        affinity = self.build_affinity(class_name, weapon_type)
+
         if rarity_grade is not None:
             rarity_grade = int(rarity_grade)
             if rarity_grade not in (3, 4, 5, 6):
@@ -1817,6 +1976,8 @@ class MistfallDatabase:
             bool(include_second_weapon),
             int(rarity_grade) if rarity_grade is not None else None,
             bool(use_triumph_wine),
+            weapon_type or None,
+            affinity,
         )
         cached_result = self._auto_build_result_cache.get(result_cache_key)
         if cached_result is not None:
@@ -1920,16 +2081,16 @@ class MistfallDatabase:
 
         def final_rank(
             vector: tuple[int, ...],
-            value: tuple[int, int, int, tuple[tuple[int, int, tuple[int, ...]], ...]],
+            value: tuple[int, int, int, int, tuple[tuple[int, int, tuple[int, ...]], ...]],
         ) -> tuple[Any, ...]:
-            off_target, used_gems, grade_sum, _choices = value
+            affinity_penalty, off_target, used_gems, grade_sum, _choices = value
             overshoot = overshoot_for(vector)
             overshoot_sum = sum(overshoot)
             deficits = deficits_for(vector)
 
             if overshoot_sum == 0 and not any(deficits):
                 # Exact without wine is always the best outcome.
-                return (0, off_target, used_gems, -grade_sum)
+                return (0, affinity_penalty, off_target, used_gems, -grade_sum)
 
             can_wine, wine_bonus, profile = wine_exact_plan(vector)
             if can_wine and any(wine_bonus):
@@ -1937,6 +2098,7 @@ class MistfallDatabase:
                     1,
                     sum(wine_bonus),
                     profile,
+                    affinity_penalty,
                     off_target,
                     used_gems,
                     -grade_sum,
@@ -1950,6 +2112,7 @@ class MistfallDatabase:
                 remaining_after_best_wine(vector),
                 sum(deficits),
                 max(deficits, default=0),
+                affinity_penalty,
                 off_target,
                 used_gems,
                 -grade_sum,
@@ -1960,7 +2123,7 @@ class MistfallDatabase:
             active_weapon_slot,
         ]
 
-        # state -> (off_target, used_gems, grade_sum, choices)
+        # state -> (affinity penalty, off_target, used_gems, grade_sum, choices)
         #
         # Important performance detail: the previous implementation copied two
         # dictionaries (selected cfgs + gem lists) for EVERY state/candidate
@@ -1970,9 +2133,9 @@ class MistfallDatabase:
         Choice = tuple[int, int, tuple[int, ...]]
         states: dict[
             tuple[int, ...],
-            tuple[int, int, int, tuple[Choice, ...]],
+            tuple[int, int, int, int, tuple[Choice, ...]],
         ] = {
-            zero_vector: (0, 0, 0, tuple())
+            zero_vector: (0, 0, 0, 0, tuple())
         }
 
         # Adaptive beam.  Large target lists are exactly where Legendary
@@ -1996,6 +2159,8 @@ class MistfallDatabase:
                 slot,
                 cleaned_targets,
                 rarity_grade,
+                weapon_type,
+                affinity,
             )
             if not candidates:
                 rarity_text = (
@@ -2010,10 +2175,11 @@ class MistfallDatabase:
 
             next_states: dict[
                 tuple[int, ...],
-                tuple[int, int, int, tuple[Choice, ...]],
+                tuple[int, int, int, int, tuple[Choice, ...]],
             ] = {}
 
             for state_vector, (
+                state_affinity_penalty,
                 state_off,
                 state_used_gems,
                 state_grade,
@@ -2030,18 +2196,24 @@ class MistfallDatabase:
                     )
 
                     next_off = state_off + int(candidate["off_target"])
+                    next_affinity_penalty = (
+                        state_affinity_penalty
+                        + int(candidate.get("affinity_penalty", 0))
+                    )
                     next_used = state_used_gems + int(candidate.get("used_gems", 0))
                     next_grade = state_grade + int(candidate["grade"])
 
                     previous = next_states.get(next_vector)
                     if previous is not None and (
+                        next_affinity_penalty,
                         next_off,
                         next_used,
                         -next_grade,
                     ) >= (
                         previous[0],
                         previous[1],
-                        -previous[2],
+                        previous[2],
+                        -previous[3],
                     ):
                         continue
 
@@ -2051,6 +2223,7 @@ class MistfallDatabase:
                         tuple(int(gem_id) for gem_id in candidate["gems"]),
                     )
                     next_states[next_vector] = (
+                        next_affinity_penalty,
                         next_off,
                         next_used,
                         next_grade,
@@ -2087,7 +2260,8 @@ class MistfallDatabase:
                         sum(deficits),
                         value[0],
                         value[1],
-                        -value[2],
+                        value[2],
+                        -value[3],
                     )
 
                 ranked = sorted(next_states.items(), key=partial_rank)
@@ -2102,7 +2276,7 @@ class MistfallDatabase:
             states.items(),
             key=lambda pair: final_rank(pair[0], pair[1]),
         )
-        off_target, used_gems, grade_sum, choices = best_value
+        affinity_penalty, off_target, used_gems, grade_sum, choices = best_value
         slot_cfg = {slot: cfg for slot, cfg, _gems in choices}
         slot_gems = {slot: list(gems) for slot, _cfg, gems in choices}
 
@@ -2139,6 +2313,18 @@ class MistfallDatabase:
                     if int(item.get("g", 0) or 0) == int(rarity_grade)
                 ]
             if inactive_items:
+                alternative_types = [
+                    current_type for current_type in available_weapon_types
+                    if current_type != weapon_type
+                ]
+                if alternative_types:
+                    alternative_type = alternative_types[0]
+                    typed_items = [
+                        item for item in inactive_items
+                        if self.item_weapon_type(item) == alternative_type
+                    ]
+                    if typed_items:
+                        inactive_items = typed_items
                 filler = max(
                     inactive_items,
                     key=lambda item: (
@@ -2172,6 +2358,9 @@ class MistfallDatabase:
             "wine_profile": int(wine_profile),
             "wine_points": int(sum(wine_bonus.values())),
             "wine_budget": int(WINE_TOTAL_BUDGET),
+            "weapon_type": weapon_type,
+            "affinity": affinity,
+            "affinity_penalty": int(affinity_penalty),
         }
         self._auto_build_result_cache[result_cache_key] = {
             **result,
@@ -5500,6 +5689,7 @@ class BuildCreatorPage(QWidget):
     apply_edit_requested = Signal(int, str, str, int)
     save_copy_requested = Signal(str, str, int)
     cancel_edit_requested = Signal()
+    class_imported = Signal(str)
 
     """
     Visual build creator:
@@ -5514,6 +5704,8 @@ class BuildCreatorPage(QWidget):
         self.class_name: str | None = None
         self.active_slot = 10
         self.active_weapon_slot = DEFAULT_ACTIVE_WEAPON_SLOT
+        self.auto_weapon_type: str | None = None
+        self._last_build_was_auto = False
         self.auto_rarity_grade = 6
         self.auto_rarity_buttons: dict[int, RarityDiamondButton] = {}
         self.triumph_wine_bonus: Counter = Counter()
@@ -5824,6 +6016,34 @@ class BuildCreatorPage(QWidget):
         auto_layout.addWidget(rarity_panel)
         self._refresh_auto_rarity_buttons()
 
+        weapon_panel = QFrame()
+        weapon_panel.setObjectName("autoRarityPanel")
+        weapon_layout = QHBoxLayout(weapon_panel)
+        weapon_layout.setContentsMargins(
+            ui_px(8), ui_px(5), ui_px(8), ui_px(5)
+        )
+        weapon_layout.setSpacing(ui_px(7))
+        weapon_title = QLabel("Тип оружия")
+        weapon_title.setObjectName("autoRarityTitle")
+        weapon_layout.addWidget(weapon_title)
+        self.auto_weapon_combo = QComboBox()
+        self.auto_weapon_combo.setObjectName("autoWeaponTypeCombo")
+        self.auto_weapon_combo.setToolTip(
+            "Оружие ограничивает пул автоподбора и определяет, какие "
+            "физические или магические аксессуары будут предпочтительны."
+        )
+        self.auto_weapon_combo.currentIndexChanged.connect(
+            self._auto_weapon_type_changed
+        )
+        weapon_layout.addWidget(self.auto_weapon_combo, 1)
+        self.auto_affinity_label = QLabel("—")
+        self.auto_affinity_label.setObjectName("muted")
+        self.auto_affinity_label.setToolTip(
+            "Направленность автоматически выбранных кольца и ожерелья"
+        )
+        weapon_layout.addWidget(self.auto_affinity_label)
+        auto_layout.addWidget(weapon_panel)
+
         self.include_second_weapon = QCheckBox("Добавлять второе оружие")
         self.include_second_weapon.setObjectName("secondWeaponCheck")
         self.include_second_weapon.setChecked(False)
@@ -5939,17 +6159,33 @@ class BuildCreatorPage(QWidget):
         )
         code_layout.setSpacing(ui_px(5))
 
-        code_title = QLabel("Готовый код сборки")
+        code_title = QLabel("Код сборки")
         code_title.setObjectName("sectionTitle")
         code_layout.addWidget(code_title)
 
         code_row = QHBoxLayout()
         self.generated_code = QLineEdit()
-        self.generated_code.setReadOnly(True)
         self.generated_code.setPlaceholderText(
-            "Код появится автоматически после выбора класса"
+            "Код появится автоматически — сюда же можно вставить Gear Code"
+        )
+        self.generated_code.setClearButtonEnabled(True)
+        self.generated_code.setToolTip(
+            "Вставь сюда код из игры и нажми «Загрузить код»."
+        )
+        self.generated_code.returnPressed.connect(
+            self.import_code_into_autobuilder
         )
         code_row.addWidget(self.generated_code, 1)
+
+        load_code_button = QPushButton("Загрузить код")
+        load_code_button.setObjectName("secondaryButton")
+        load_code_button.setToolTip(
+            "Загрузить предметы и перенести атрибуты к автоподбору"
+        )
+        load_code_button.clicked.connect(
+            lambda _checked=False: self.import_code_into_autobuilder()
+        )
+        code_row.addWidget(load_code_button)
 
         copy_button = QPushButton("Копировать код")
         copy_button.setObjectName("goldButton")
@@ -6062,6 +6298,9 @@ class BuildCreatorPage(QWidget):
                 slot: [] for slot in DISPLAY_SLOT_ORDER
             }
             self.active_slot = 10
+            self.active_weapon_slot = DEFAULT_ACTIVE_WEAPON_SLOT
+            self.auto_weapon_type = None
+            self._last_build_was_auto = False
             self._clear_target_rows()
 
         if self.database:
@@ -6072,8 +6311,64 @@ class BuildCreatorPage(QWidget):
                 self._available_affixes()
             )
 
+        self._refresh_weapon_type_selector()
+
         self._refresh_editor()
         self._update_generated()
+
+    def _refresh_weapon_type_selector(
+        self,
+        preferred: str | None = None,
+    ) -> None:
+        self.auto_weapon_combo.blockSignals(True)
+        try:
+            previous = preferred or self.auto_weapon_type
+            self.auto_weapon_combo.clear()
+            weapon_types: list[str] = []
+            if self.database and self.class_name:
+                weapon_types = self.database.class_weapon_types(self.class_name)
+            for weapon_type in weapon_types:
+                self.auto_weapon_combo.addItem(
+                    WEAPON_TYPE_RU.get(weapon_type, weapon_type),
+                    weapon_type,
+                )
+            index = self.auto_weapon_combo.findData(previous)
+            if index < 0 and self.auto_weapon_combo.count():
+                index = 0
+            if index >= 0:
+                self.auto_weapon_combo.setCurrentIndex(index)
+                self.auto_weapon_type = str(
+                    self.auto_weapon_combo.itemData(index)
+                )
+            else:
+                self.auto_weapon_type = None
+        finally:
+            self.auto_weapon_combo.blockSignals(False)
+        self._refresh_auto_affinity_label()
+
+    def _refresh_auto_affinity_label(self) -> None:
+        if not self.database or not self.class_name:
+            self.auto_affinity_label.setText("—")
+            return
+        affinity = self.database.build_affinity(
+            self.class_name,
+            self.auto_weapon_type,
+        )
+        self.auto_affinity_label.setText(
+            "ФИЗ" if affinity == "physical" else "МАГ"
+        )
+        self.auto_affinity_label.setToolTip(
+            AFFINITY_RU.get(affinity, affinity)
+            + ": автоподбор предпочитает аксессуары этого типа"
+        )
+
+    def _auto_weapon_type_changed(self, index: int) -> None:
+        weapon_type = self.auto_weapon_combo.itemData(index)
+        self.auto_weapon_type = str(weapon_type) if weapon_type else None
+        self._refresh_auto_affinity_label()
+        self._target_changed()
+        if self._last_build_was_auto and self.requested_attributes():
+            self.auto_pick_build()
 
     def _class_items(
         self,
@@ -6092,6 +6387,111 @@ class BuildCreatorPage(QWidget):
     # --------------------------------------------------------
     # Existing build editing
     # --------------------------------------------------------
+    def import_code_into_autobuilder(
+        self,
+        code: str | None = None,
+    ) -> DecodedBuild | None:
+        """Load an equipped Gear Code and expose its attributes as targets."""
+        if not self.database:
+            self.auto_status.setText("База предметов ещё не загружена.")
+            return None
+
+        source_code = clean_code(
+            code if code is not None else self.generated_code.text()
+        )
+        if not source_code:
+            self.auto_status.setText("Вставь Gear Code из игры.")
+            return None
+
+        weapon_slot = int(self.active_weapon_slot)
+        if weapon_slot not in WEAPON_SLOTS:
+            weapon_slot = DEFAULT_ACTIVE_WEAPON_SLOT
+
+        try:
+            decoded = self.database.decode(source_code, weapon_slot)
+        except Exception as exc:
+            self.auto_status.setText(f"Не удалось загрузить код: {exc}")
+            return None
+
+        # Importing an in-game code starts a new editable draft, not an edit
+        # transaction for a build previously saved in the local repository.
+        self.set_state(self.database, decoded.class_name)
+        self.finish_edit_mode()
+        self._clear_triumph_wine()
+
+        self.slot_cfg = {
+            slot: 0 for slot in DISPLAY_SLOT_ORDER
+        }
+        self.slot_gems = {
+            slot: [] for slot in DISPLAY_SLOT_ORDER
+        }
+        for decoded_item in decoded.items:
+            if decoded_item.slot not in self.slot_cfg:
+                continue
+            self.slot_cfg[decoded_item.slot] = int(decoded_item.cfg or 0)
+            self.slot_gems[decoded_item.slot] = list(decoded_item.gem_ids)
+
+        self.active_weapon_slot = weapon_slot
+        self.active_slot = weapon_slot
+        self._last_build_was_auto = False
+        self.include_second_weapon.setChecked(
+            all(self.slot_cfg.get(slot, 0) for slot in WEAPON_SLOTS)
+        )
+
+        active_item = next(
+            (
+                decoded_item.item
+                for decoded_item in decoded.items
+                if decoded_item.slot == weapon_slot
+            ),
+            None,
+        )
+        self._refresh_weapon_type_selector(
+            self.database.item_weapon_type(active_item)
+        )
+
+        # Preserve a uniform supported rarity from the equipped set. Mixed or
+        # mythic sets remain on the user's currently selected solver rarity.
+        active_grades = {
+            int(decoded_item.item.get("g", 0) or 0)
+            for decoded_item in decoded.items
+            if decoded_item.item
+            and decoded_item.cfg
+            and (
+                decoded_item.slot not in WEAPON_SLOTS
+                or decoded_item.slot == weapon_slot
+            )
+        }
+        if len(active_grades) == 1:
+            imported_grade = next(iter(active_grades))
+            if imported_grade in self.auto_rarity_buttons:
+                self.auto_rarity_grade = imported_grade
+                self._refresh_auto_rarity_buttons()
+
+        self._clear_target_rows()
+        for name, level in sorted(
+            decoded.attributes.items(),
+            key=lambda pair: (-int(pair[1]), ru_affix(pair[0])),
+        ):
+            if int(level) > 0:
+                self.add_target_row(str(name), min(int(level), 7))
+
+        self.class_imported.emit(decoded.class_name)
+        self._refresh_editor()
+        self._update_generated()
+        self.creator_side_tabs.setCurrentIndex(0)
+
+        attribute_count = len(self.requested_attributes())
+        self.auto_status.setText(
+            f"Код загружен: {attribute_count} атр. "
+            "Удалите ненужные строки кнопкой ×, затем нажмите "
+            "«Подобрать сборку»."
+        )
+        self.creator_status.setText(
+            "Одетая сборка загружена из Gear Code и готова к пересборке."
+        )
+        return decoded
+
     def load_build_for_edit(
         self,
         index: int,
@@ -6128,9 +6528,23 @@ class BuildCreatorPage(QWidget):
                 decoded_item.gem_ids
             )
 
+        active_item = next(
+            (
+                decoded_item.item
+                for decoded_item in decoded.items
+                if decoded_item.slot == weapon_slot
+            ),
+            None,
+        )
+        if self.database:
+            self._refresh_weapon_type_selector(
+                self.database.item_weapon_type(active_item)
+            )
+
         self._clear_triumph_wine()
         self.active_weapon_slot = weapon_slot
         self.active_slot = 10
+        self._last_build_was_auto = False
 
         self.editing_build_index = int(index)
         self.editing_original_name = str(name or "Без названия")
@@ -6530,6 +6944,12 @@ class BuildCreatorPage(QWidget):
         self._clear_triumph_wine()
         self.slot_cfg[self.active_slot] = int(cfg or 0)
         self.slot_gems[self.active_slot] = []
+        self._last_build_was_auto = False
+        if self.active_slot in WEAPON_SLOTS and self.database:
+            selected_item = self.database.item_by_id.get(int(cfg or 0))
+            weapon_type = self.database.item_weapon_type(selected_item)
+            if weapon_type:
+                self._refresh_weapon_type_selector(weapon_type)
         self.active_socket_index = 0
         self._refresh_editor()
         self._update_generated()
@@ -6918,6 +7338,8 @@ class BuildCreatorPage(QWidget):
         self.auto_rarity_grade = grade
         self._refresh_auto_rarity_buttons()
         self._target_changed()
+        if self._last_build_was_auto and self.requested_attributes():
+            self.auto_pick_build()
 
     def _refresh_auto_rarity_buttons(self) -> None:
         for grade, button in self.auto_rarity_buttons.items():
@@ -7132,6 +7554,7 @@ class BuildCreatorPage(QWidget):
                 self.include_second_weapon.isChecked(),
                 self.auto_rarity_grade,
                 self.use_triumph_wine.isChecked(),
+                self.auto_weapon_type,
             )
         except Exception as exc:
             self._clear_triumph_wine(rerender=True)
@@ -7157,6 +7580,7 @@ class BuildCreatorPage(QWidget):
         })
         self.triumph_wine_profile = int(result.get("wine_profile", 0) or 0)
         self.triumph_wine_exact = bool(result.get("exact", False))
+        self._last_build_was_auto = True
 
         self._refresh_editor()
         decoded = self._update_generated()
@@ -7208,13 +7632,25 @@ class BuildCreatorPage(QWidget):
                 f"{ru_affix(name)} Lv.{int(final_attributes.get(name, 0))}"
                 for name in targets
             )
-            text = f"Подобрано [{rarity_name}]: " + target_text
+            weapon_text = WEAPON_TYPE_RU.get(
+                str(result.get("weapon_type") or ""),
+                str(result.get("weapon_type") or "оружие"),
+            )
+            affinity_text = AFFINITY_RU.get(
+                str(result.get("affinity") or ""),
+                str(result.get("affinity") or ""),
+            )
+            text = (
+                f"Подобрано [{rarity_name}] · {weapon_text} · "
+                f"аксессуары: {affinity_text}: " + target_text
+            )
             if wine_text:
                 text += ". " + wine_text + ". Голубые деления — уровни от вина."
             self.auto_status.setText(text)
 
     def clear_active_slot(self) -> None:
         self._clear_triumph_wine()
+        self._last_build_was_auto = False
         self.slot_cfg[self.active_slot] = 0
         self.slot_gems[self.active_slot] = []
         self._refresh_editor()
@@ -7222,6 +7658,7 @@ class BuildCreatorPage(QWidget):
 
     def reset_build(self) -> None:
         self._clear_triumph_wine()
+        self._last_build_was_auto = False
         self.slot_cfg = {
             slot: 0 for slot in DISPLAY_SLOT_ORDER
         }
@@ -7241,7 +7678,10 @@ class BuildCreatorPage(QWidget):
 
         self._clear_triumph_wine()
         self.active_weapon_slot = weapon_slot
-        self._update_generated()
+        if self._last_build_was_auto and self.requested_attributes():
+            self.auto_pick_build()
+        else:
+            self._update_generated()
 
     def _update_generated(
         self,
@@ -7499,6 +7939,9 @@ class MainWindow(QMainWindow):
         self.creator_page.cancel_edit_requested.connect(
             self.cancel_creator_edit
         )
+        self.creator_page.class_imported.connect(
+            self._creator_imported_class
+        )
 
         footer = QHBoxLayout()
         self.status_label = QLabel("Готово")
@@ -7578,6 +8021,15 @@ class MainWindow(QMainWindow):
         self.tab_saved.setChecked(index == 0)
         self.tab_import.setChecked(index == 1)
         self.tab_creator.setChecked(index == 3)
+
+    def _creator_imported_class(self, class_name: str) -> None:
+        """Keep main navigation in sync when a pasted code changes class."""
+        self.active_class = class_name
+        self.current_class_label.setText(
+            CLASS_RU.get(class_name, class_name)
+        )
+        self._set_class_navigation_visible(True)
+        self.search_class_hint()
 
     def _load_initial_database(self) -> None:
         candidates = [CACHE_DATA_FILE, BUNDLED_DATA_FILE]
