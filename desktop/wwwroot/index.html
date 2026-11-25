@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="ru" data-type="software">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="page-type" content="software">
+  <meta name="site-kind" content="software">
+  <meta name="description" content="Редактор экипировки, самоцветов и Gear Code для Mistfall Hunter.">
+  <meta name="theme-color" content="#0a0c0a">
+  <title>Mistfall Forge</title>
+  <link rel="stylesheet" href="/forge.css">
+  <script type="module" src="/forge.js"></script>
+  <script type="module" src="/header-braid.js"></script>
+</head>
+<body>
+  <header class="top">
+    <a class="skip-link" href="#main" data-t="skipContent">К рабочей области</a>
+    <h1>Mistfall Forge</h1>
+    <canvas id="header-braid" class="ornament" aria-hidden="true"></canvas>
+    <div class="display-settings">
+      <label class="scale-field"><span data-t="scale">Масштаб</span><select id="ui-scale" disabled>
+        <option value="0" data-t="scaleAuto">Авто</option><option value="100">100%</option>
+        <option value="115">115%</option><option value="130">130%</option><option value="145">145%</option>
+      </select></label>
+      <div class="languages" aria-label="Language" data-label="language">
+      <button type="button" data-lang="ru" aria-label="Русский" title="Русский"><i class="flag ru"></i></button>
+      <button type="button" data-lang="en" aria-label="English" title="English"><i class="flag en"></i></button>
+      <button type="button" data-lang="es" aria-label="Español" title="Español"><i class="flag es"></i></button>
+      </div>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <div class="work-header" id="class-nav" hidden>
+      <div class="work-actions">
+        <a href="#classes" class="control" id="class-back" data-t="changeClass">← Сменить класс</a><strong id="class-name"></strong>
+      </div>
+      <nav class="tabs" aria-label="Mistfall Forge">
+        <a href="#library" data-page="library" data-t="library">Мои сборки</a>
+        <a href="#import" data-page="import" data-t="importBuild">Импорт сборки</a>
+        <a href="#editor" data-page="editor" data-t="editor">Создание сборки</a>
+      </nav>
+      <a href="#preview" class="control preview-link" id="preview-link" data-t="preview">3D-примерочная</a>
+    </div>
+
+    <section id="classes" class="page classes-page">
+      <div class="panel class-picker">
+        <h2 data-t="chooseClass">Выберите класс</h2>
+        <p data-t="classIntro">Сохранённые сборки разделены по классам.</p>
+        <div id="class-grid" class="class-grid" aria-live="polite"></div>
+        <p class="class-note" data-t="classNote">Класс можно сменить в любой момент.</p>
+      </div>
+    </section>
+
+    <section id="editor" class="page editor-grid" data-label="editor" hidden>
+      <aside class="panel kit">
+        <div class="section-head"><h2 data-t="equipment">Экипировка</h2><span id="gear-count" class="counter">0 / 9</span></div>
+        <div id="slot-grid" class="slot-grid"></div>
+        <fieldset class="active-field">
+          <legend data-t="active">Активное оружие</legend>
+          <div class="segments"><button type="button" data-active="10">I</button><button type="button" data-active="11">II</button></div>
+        </fieldset>
+        <button type="button" class="quiet wide" id="sample" data-t="sample">Пример сборки</button>
+      </aside>
+
+      <section class="panel catalog">
+        <div class="section-head"><div><small class="kicker" data-t="catalog">Каталог</small><h2 id="slot-title">Оружие I</h2></div><span id="catalog-count" class="counter"></span></div>
+        <div class="filters">
+          <label class="search"><span aria-hidden="true">⌕</span><input id="gear-search" type="search" data-ph="gearSearch" aria-label="Search equipment"></label>
+          <div class="rarity-filter">
+            <div id="rarity-filter" class="diamonds" role="group" data-label="rarity"></div>
+            <span id="rarity-filter-name" class="rarity-caption"></span>
+          </div>
+          <div class="effect-filter" id="gear-effect-filter">
+            <button type="button" id="effect-open" aria-haspopup="dialog" data-t="allEffects">Все эффекты</button>
+            <button type="button" id="effect-clear" class="square-action" data-label="resetFilter" hidden>×</button>
+          </div>
+        </div>
+        <div id="item-grid" class="item-grid" aria-live="polite"></div>
+        <div id="item-pagination" class="pagination"></div>
+        <div id="item-detail" class="item-detail"></div>
+        <form id="brand-form" class="item-detail" aria-labelledby="brand-title" hidden>
+          <div class="item-heading">
+            <div><h3 id="brand-title" data-t="soulBrand">Клеймо души</h3><p id="brand-grade" class="gear-innate"></p></div>
+            <button type="button" id="brand-remove" class="quiet" data-t="brandRemove" hidden>Снять клеймо</button>
+          </div>
+          <p class="intro" id="brand-empty" data-t="brandChoose">Выбери клеймо в каталоге.</p>
+          <section id="brand-config" hidden>
+            <div class="brand-level">
+              <h3 data-t="brandLevel">Уровень клейма</h3>
+              <div id="brand-level" class="brand-segments" role="group" data-label="brandLevel"></div>
+              <p id="brand-cap" class="intro"></p>
+            </div>
+            <div class="socket-workspace brand-workspace">
+              <section class="socket-rail">
+                <h3 id="brand-effects-title" data-t="brandEffects">Атрибуты клейма</h3>
+                <div id="brand-effects" class="brand-effect-slots" role="group" aria-labelledby="brand-effects-title"></div>
+              </section>
+              <section id="brand-effect-editor" class="gem-browser"></section>
+            </div>
+          </section>
+          <p id="brand-status" class="message" role="status"></p>
+          <div id="brand-actions" class="dialog-actions" hidden>
+            <button type="button" id="brand-cancel" data-t="cancel">Отмена</button>
+            <button type="submit" id="brand-apply" class="primary" data-t="brandApply">Применить</button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="panel optimizer">
+        <div class="segments mode-tabs">
+          <button type="button" id="mode-goals" data-t="optimizer">Автоподбор</button>
+          <button type="button" id="mode-totals" data-t="totals">Итоговые</button>
+        </div>
+        <section id="goals-panel">
+          <div class="section-head compact-head"><h2 data-t="targetTitle">Автоподбор атрибутов</h2>
+            <button type="button" id="target-add" class="square-action" aria-label="Добавить атрибут" data-label="addTarget">+</button></div>
+          <div class="solver-fields">
+            <div class="solver-line rarity-line"><strong data-t="rarity">Редкость</strong><div id="solver-rarity" class="diamonds" role="group" data-label="rarity"></div><span id="rarity-name"></span></div>
+            <div class="solver-line"><label for="weapon" data-t="weapon">Тип оружия</label><select id="weapon"></select><abbr id="affinity"></abbr></div>
+            <label class="checkbox"><input id="second" type="checkbox"><span data-t="second">Добавлять второе оружие</span></label>
+            <label class="checkbox"><input id="auto-brand" type="checkbox"><span data-t="autoBrand">Подбирать клеймо души</span></label>
+            <div class="wine-line"><label class="checkbox"><input id="use-wine" type="checkbox"><span data-t="wine">Вино триумфа</span></label><select id="wine" data-label="wine"></select></div>
+          </div>
+          <div id="target-list" class="target-list"></div>
+          <button type="button" id="solve" class="primary wide" data-t="solve">Подобрать сборку</button>
+          <p id="solver-status" class="message" aria-live="polite"></p>
+        </section>
+        <section id="totals-panel" hidden>
+          <div class="section-head compact-head"><h2 data-t="resultTitle">Итоговые атрибуты</h2>
+            <div class="weapon-switch" role="group" data-label="active">
+              <button type="button" data-active="10">I</button><button type="button" data-active="11">II</button>
+            </div>
+          </div>
+          <div id="stat-list" class="stats"></div>
+          <div id="affix-list" class="totals-list"></div>
+        </section>
+      </aside>
+    </section>
+
+    <section class="panel code-panel" id="code-panel" hidden>
+      <div class="edit-session" id="edit-session" hidden>
+        <p id="editing-label"></p>
+        <button type="button" id="edit-discard" class="quiet" data-t="discardEdit">Отменить правки</button>
+        <button type="button" id="edit-copy" class="quiet" data-t="saveCopy">Сохранить копию</button>
+      </div>
+      <form id="code-form">
+        <label for="code"><span data-t="gearCode">Код сборки</span> <small id="code-version" class="counter"></small></label>
+        <div class="code-row"><input id="code" autocomplete="off" spellcheck="false" maxlength="320" data-ph="codePlaceholder">
+          <button type="submit" class="quiet" data-t="load">Загрузить</button>
+          <button type="button" class="quiet" id="copy-code" data-t="copyCode">Копировать код</button>
+          <button type="button" class="quiet" id="reset" data-t="reset">Сбросить сборку</button>
+          <button type="button" class="primary" id="save-build" data-t="save">Сохранить сборку</button>
+        </div>
+        <div class="code-note" id="legacy-export-note" hidden>
+          <p data-t="legacyCodeNote">Игра больше не принимает этот формат. Обнови код перед копированием.</p>
+          <button type="button" id="upgrade-code" class="quiet" data-t="upgradeCode">Обновить код</button>
+        </div>
+        <p class="intro" id="brand-export-note" hidden data-t="brandOutsideCode">Клеймо сохраняется в Forge отдельно. Код игры его не передаёт.</p>
+        <div class="code-note" id="weapon-export-note" hidden>
+          <p data-t="weaponIIOnly">Оружие только в слоте II. Если игра не принимает код, попробуй перенести его в I.</p>
+          <button type="button" id="move-weapon" class="quiet" data-t="moveWeapon">Перенести в I</button>
+        </div>
+        <p id="code-status" class="message" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section id="library" class="page library" hidden>
+      <div class="library-tools">
+        <label class="search"><span aria-hidden="true">⌕</span><input id="library-search" type="search" data-ph="librarySearch" aria-label="Search library"></label>
+        <button type="button" id="all-affixes" data-t="allAffixes">Все атрибуты</button>
+        <button type="button" id="refresh-catalog" data-t="refreshCatalog">Обновить базу</button>
+        <details class="catalog-tools">
+          <summary class="control" data-t="catalogTools">Данные каталога</summary>
+          <div class="panel catalog-menu">
+            <label class="control file-btn"><span data-t="importCatalog">Импорт базы JSON</span><input type="file" id="catalog-file" accept=".json,application/json" data-label="importCatalog"></label>
+            <label class="control file-btn"><span data-t="importCatalogPack">Импорт базы и иконок</span><input type="file" id="catalog-pack" webkitdirectory multiple data-label="importCatalogPack"></label>
+            <button type="button" id="data-folder" data-t="dataFolder" hidden>Папка данных</button>
+          </div>
+        </details>
+      </div>
+      <div id="library-grid" class="library-grid" aria-live="polite"></div>
+    </section>
+
+    <section id="import" class="page import-page" hidden>
+      <form id="import-form" class="panel import-form">
+        <h2><label for="import-code" data-t="gearCode">Код сборки</label></h2>
+        <div class="import-code-row"><input id="import-code" maxlength="320" autocomplete="off" spellcheck="false" data-ph="codePlaceholder">
+          <button type="submit" data-t="load">Загрузить код</button></div>
+        <p id="import-status" class="message" aria-live="polite" data-t="importHint">Вставь код из меню подготовки. Здесь появятся предметы, камни и атрибуты.</p>
+      </form>
+      <div class="panel import-result" id="import-result" hidden>
+        <div class="import-preview">
+          <div id="import-kit"><h2 id="import-class"></h2><div id="import-gear"></div></div>
+          <section class="card-attributes">
+            <div class="section-head compact-head"><h2 data-t="attributes">Атрибуты</h2><div id="import-weapons" class="weapon-switch" role="group" data-label="active" data-title="weaponNotInCode"></div></div>
+            <div id="import-affixes" class="attribute-list"></div>
+          </section>
+        </div>
+        <div class="import-save">
+          <label for="import-name" data-t="buildName">Название</label><input id="import-name" maxlength="100">
+          <button type="button" id="import-edit" data-t="editBuild" disabled>Редактировать сборку</button>
+          <button type="button" class="primary" id="import-save" data-t="save" disabled>Сохранить сборку</button>
+        </div>
+        <div class="code-note" id="legacy-import-note" hidden>
+          <p data-t="legacyCodeNote">Игра больше не принимает этот формат. Обнови код перед копированием.</p>
+          <button type="button" id="upgrade-import" class="quiet" data-t="upgradeCode">Обновить код</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="preview" class="page preview-grid" hidden>
+      <div class="panel stage">
+        <div id="viewport" class="viewport" data-label="preview"></div>
+        <div class="stage-top"><button type="button" id="camera-reset" class="quiet" data-t="camera">Сбросить камеру</button></div>
+        <div class="stage-caption"><h2 id="preview-name">Чёрная стрела</h2><p data-t="cameraHint">Перетащи для вращения · колесо для масштаба</p></div>
+        <p id="preview-status" class="stage-error message" role="status"></p>
+      </div>
+      <aside class="panel preview-tools">
+        <div class="section-head"><h2 data-t="equippedPreview">Модель сборки</h2><span class="counter" data-t="test">Тест</span></div>
+        <div id="preview-gear" class="slot-grid preview-gear" role="group" data-label="equipment"></div>
+        <p id="model-coverage" class="message"></p>
+        <section class="preview-totals" aria-labelledby="preview-totals-title">
+          <div class="section-head compact-head">
+            <h3 id="preview-totals-title" data-t="resultTitle">Итоговые атрибуты</h3>
+            <div class="weapon-switch" role="group" data-label="active">
+              <button type="button" data-active="10">I</button><button type="button" data-active="11">II</button>
+            </div>
+          </div>
+          <div id="preview-stats" class="stats"></div>
+          <div id="preview-affixes" class="totals-list"></div>
+          <p id="preview-totals-status" class="message" role="status"></p>
+        </section>
+        <details class="model-tools"><summary data-t="modelSettings">Настройки 3D</summary>
+          <div class="model-options">
+            <label class="checkbox" id="motion-option" hidden><input type="checkbox" id="animate-model" checked><span data-t="characterAnimation">Анимация персонажа</span></label>
+            <label class="checkbox"><input type="checkbox" id="particles" checked><span data-t="particles">Частицы</span></label>
+            <label class="control file-btn pack-picker"><span data-t="modelPack">Подключить папку моделей</span>
+              <input type="file" id="model-pack" webkitdirectory multiple data-label="modelPack">
+            </label>
+            <details class="model-tools"><summary data-t="customModel">Привязать отдельный GLB</summary>
+              <p class="intro" data-t="modelHint">Выбери цель и GLB с оригинальной моделью.</p>
+              <select id="model-target" aria-label="Model target"></select>
+              <input type="file" id="model-file" accept=".glb,model/gltf-binary" aria-label="GLB file">
+            </details>
+            <button type="button" id="reset-models" class="quiet wide model-reset" data-t="resetModels">Отключить модели</button>
+            <p id="model-status" class="message" role="status"></p>
+          </div>
+        </details>
+      </aside>
+    </section>
+
+    <p id="app-status" class="message app-status" role="status"></p>
+  </main>
+  <dialog id="save-dialog">
+    <form id="save-form">
+      <h2 data-t="save">Сохранить сборку</h2>
+      <label><span data-t="buildName">Название</span><input id="build-name" required maxlength="100"></label>
+      <p id="save-status" class="message" aria-live="polite"></p>
+      <div class="dialog-actions"><button type="button" id="save-cancel" class="quiet" data-t="cancel">Отмена</button>
+        <button type="submit" id="save-submit" class="primary" data-t="saveAction">Сохранить</button></div>
+    </form>
+  </dialog>
+  <dialog id="attributes-dialog" class="attributes-dialog" aria-labelledby="attributes-title">
+    <div class="section-head"><h2 id="attributes-title"></h2><form method="dialog"><button class="square-action" data-label="close">×</button></form></div>
+    <input id="attribute-search" type="search" data-ph="affixSearch">
+    <div id="attribute-choices" class="attribute-choices"></div>
+  </dialog>
+  <dialog id="detail-dialog" class="detail-dialog" aria-labelledby="detail-title">
+    <div class="section-head"><h2 id="detail-title"></h2><form method="dialog"><button class="square-action" data-label="close">×</button></form></div>
+    <div id="detail-content"></div>
+  </dialog>
+  <dialog id="metadata-dialog">
+    <form id="metadata-form">
+      <h2 data-t="editMetadata">Название и код</h2>
+      <label><span data-t="buildName">Название</span><input id="metadata-name" required maxlength="100"></label>
+      <label><span data-t="gearCode">Код сборки</span><input id="metadata-code" required maxlength="320" spellcheck="false"></label>
+      <p id="metadata-status" class="message" aria-live="polite"></p>
+      <div class="dialog-actions"><button type="button" id="metadata-cancel" data-t="cancel">Отмена</button><button class="primary" type="submit" data-t="saveAction">Сохранить</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "mistfall-forge",
+  "version": "5.0.13",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild frontend/scene.js --bundle --minify --format=esm --target=es2022 --legal-comments=external --outfile=wwwroot/scene.js"
+  },
+  "dependencies": {
+    "three": "0.183.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

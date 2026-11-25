@@ -31,6 +31,15 @@ desktop.ini
 # FModel / UE tools output
 Output/
 .data/
+.playwright-cli/
+*.pak
+*.ucas
+*.utoc
+*.usmap
+*.locres
+*.glb
+*.gltf
+models/
 *.log
 *.tmp
 
@@ -42,6 +51,16 @@ ENV/
 
 # Local builds info
 BUILD_INFO.txt
+
+# Local market observations and runtime state
+price_history.db
+price_history.db-wal
+price_history.db-shm
+price_monitor_state.json
+price_monitor_*out.txt
+price_monitor_*err.txt
+pm_out.txt
+pm_err.txt
 
 # Backups
 *.bak

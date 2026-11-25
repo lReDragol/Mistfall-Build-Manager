@@ -1,0 +1,7 @@
+bin/
+obj/
+node_modules/
+wwwroot/scene.js
+wwwroot/scene.js.LEGAL.txt
+.playwright-cli/
+output/playwright/
