@@ -1,37 +1,37 @@
 # Mistfall Forge
 
-Редактор сборок для Mistfall Hunter на Windows. Импортируй Gear Code, меняй экипировку и самоцветы или попроси Forge подобрать комплект под нужные атрибуты.
+A Windows build editor for Mistfall Hunter. Import a Gear Code, change equipment and gems, or let Forge find a loadout that matches your target attributes.
 
-**[Скачать для Windows](https://github.com/lReDragol/Mistfall-Build-Manager/releases/latest)** — распакуй ZIP целиком и запусти `MistfallForge.exe`. Для запуска нужен Microsoft Edge WebView2 Runtime. Русский, английский и испанский переключаются в шапке.
+**[Download for Windows](https://github.com/lReDragol/Mistfall-Build-Manager/releases/latest)** — extract the entire ZIP and run `MistfallForge.exe`. Requires Microsoft Edge WebView2 Runtime. Switch between English, Russian, and Spanish from the top bar.
 
-## Импорт и библиотека
+## Import and save a build
 
-Выбери класс, вставь Gear Code и проверь предметы и атрибуты. Сборку можно сразу открыть в редакторе или сохранить в «Мои сборки».
+Pick a class, paste a Gear Code, and review the equipment and attributes. Open the build in the editor or save it to **My builds**.
 
-![Выбор Провидца, импорт Gear Code и сохранение сборки в библиотеку](docs/demo/import.gif)
+![The cursor selects Seer, imports a Gear Code, and saves the build to My builds](docs/demo/import.gif)
 
-## Экипировка, самоцветы и Клеймо души
+## Edit gear, gems, and Soul Brands
 
-Выбери слот слева, чтобы открыть его каталог. Установи нужный самоцвет или настрой Клеймо души: оно находится справа от сапог и сохраняется отдельно от Gear Code.
+Select an equipment slot on the left to browse items and socket gems. The **Soul Brand** slot is next to Boots. Its settings are saved with the build, separately from the Gear Code.
 
-![Установка самоцвета и настройка Клейма души в редакторе](docs/demo/equipment.gif)
+![The cursor sockets a gem in a helmet, then selects a Soul Brand and applies its Aegis effect](docs/demo/equipment.gif)
 
-## Автоподбор сборки
+## Optimize a build
 
-Укажи тип оружия и нужные атрибуты с уровнями. Forge покажет, какие цели выполнены, и сгенерирует Gear Code.
+Choose a weapon type, then add the attributes and levels you want. Forge shows which targets it matched and generates a Gear Code for the result.
 
-![Выбор атрибутов Братство и Эгида, автоподбор и просмотр результата](docs/demo/optimizer.gif)
+![The cursor adds Brotherhood and Aegis, runs the optimizer, and opens the build totals](docs/demo/optimizer.gif)
 
-## 3D-примерочная
+## Preview equipment in 3D
 
-Посмотри, как экипировка выглядит на персонаже, и поверни модель мышью. Для просмотра нужны локальные GLB: игровые модели в ZIP не входят.
+Drag to rotate the character and scroll to zoom. The preview uses local GLB files; game models are not included in the download.
 
-![Вращение Провидца в 3D-примерочной с подключёнными моделями](docs/demo/preview.gif)
+![The cursor clicks and drags to rotate the equipped Seer in the 3D preview](docs/demo/preview.gif)
 
 <details>
-<summary>Сборка из исходников</summary>
+<summary>Build from source</summary>
 
-Windows, .NET SDK 8+ и Node.js:
+Requires Windows, .NET SDK 8+, and Node.js:
 
 ```powershell
 npm.cmd ci --prefix desktop
@@ -41,4 +41,4 @@ dotnet run --project desktop/MistfallForge.csproj -c Release
 
 </details>
 
-[Лицензия MIT](LICENSE) · Названия и иллюстрации Mistfall Hunter принадлежат их правообладателям.
+[MIT License](LICENSE) · Mistfall Hunter names and artwork belong to their respective owners.
